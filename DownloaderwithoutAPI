@@ -1,0 +1,181 @@
+import ccxt
+import pandas as pd
+from datetime import datetime
+import time
+import ta
+import numpy as np
+
+def download_crypto_data(symbol, start_date, end_date, timeframe='5m'):
+    # Binance bağlantısı
+    exchange = ccxt.binance({
+        'enableRateLimit': True,
+        'rateLimit': 1200,  # Rate limit artırıldı
+        'timeout': 30000,   # Timeout süresi artırıldı
+    })
+    
+    # Tarihleri timestamp'e çevir
+    start_timestamp = exchange.parse8601(f'{start_date}T00:00:00Z')
+    end_timestamp = exchange.parse8601(f'{end_date}T23:59:59Z')
+    
+    all_candles = []
+    current_timestamp = start_timestamp
+    retry_count = 0
+    max_retries = 5
+    
+    while current_timestamp < end_timestamp:
+        try:
+            print(f"İndiriliyor... {symbol} - {datetime.fromtimestamp(current_timestamp/1000)}")
+            
+            # Mum verilerini al
+            candles = exchange.fetch_ohlcv(
+                symbol,
+                timeframe=timeframe,
+                since=current_timestamp,
+                limit=1000
+            )
+            
+            if not candles:
+                break
+                
+            all_candles.extend(candles)
+            current_timestamp = candles[-1][0] + 1
+            
+            # Başarılı istek sonrası bekleme süresi
+            time.sleep(1.2)  # 1.2 saniye bekle
+            retry_count = 0  # Başarılı istek sonrası retry sayacını sıfırla
+            
+        except Exception as e:
+            retry_count += 1
+            print(f"Hata oluştu: {str(e)}")
+            
+            if retry_count >= max_retries:
+                print(f"Maksimum deneme sayısına ulaşıldı. İndirme durduruluyor...")
+                break
+                
+            wait_time = retry_count * 60  # Her denemede bekleme süresini artır
+            print(f"Yeniden deneme {retry_count}/{max_retries}. {wait_time} saniye bekleniyor...")
+            time.sleep(wait_time)
+            continue
+    
+    # DataFrame'e dönüştür
+    df = pd.DataFrame(all_candles, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+    df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
+    
+    # Teknik göstergeleri hesapla
+    df = add_technical_indicators(df)
+    
+    # Dosya adı
+    symbol_filename = symbol.replace('/', '')
+    filename = f'binance_{symbol_filename}_{timeframe}_data.csv'
+    
+    # CSV olarak kaydet
+    df.to_csv(filename, index=False)
+    print(f"{filename} kaydedildi.")
+    
+    return df
+
+def add_technical_indicators(df):
+    try:
+        # RSI
+        df['rsi'] = ta.momentum.RSIIndicator(close=df['close'], window=14).rsi()
+        df['rsi_4h'] = ta.momentum.RSIIndicator(close=df['close'], window=48).rsi()
+        
+        # MACD - Düzeltilmiş versiyon
+        macd_indicator = ta.trend.MACD(
+            close=df['close'],
+            window_slow=26,
+            window_fast=12,
+            window_sign=9
+        )
+        df['macd'] = macd_indicator.macd()
+        df['macd_signal'] = macd_indicator.macd_signal()
+        df['macd_diff'] = macd_indicator.macd_diff()
+        
+        # Bollinger Bands
+        bollinger = ta.volatility.BollingerBands(
+            close=df['close'],
+            window=20,
+            window_dev=2
+        )
+        df['bb_upper'] = bollinger.bollinger_hband()
+        df['bb_lower'] = bollinger.bollinger_lband()
+        df['bb_middle'] = bollinger.bollinger_mavg()
+        df['bb_width'] = (df['bb_upper'] - df['bb_lower']) / df['bb_middle']
+        
+        # Hareketli Ortalamalar
+        for period in [20, 50, 100, 200]:
+            df[f'sma_{period}'] = ta.trend.SMAIndicator(close=df['close'], window=period).sma_indicator()
+            df[f'ema_{period}'] = ta.trend.EMAIndicator(close=df['close'], window=period).ema_indicator()
+        
+        # Momentum göstergeleri
+        df['stoch_rsi'] = ta.momentum.StochRSIIndicator(close=df['close']).stochrsi()
+        df['williams_r'] = ta.momentum.WilliamsRIndicator(high=df['high'], low=df['low'], close=df['close']).williams_r()
+        df['ultimate_oscillator'] = ta.momentum.UltimateOscillator(
+            high=df['high'],
+            low=df['low'],
+            close=df['close']
+        ).ultimate_oscillator()
+        
+        # Trend göstergeleri
+        df['adx'] = ta.trend.ADXIndicator(high=df['high'], low=df['low'], close=df['close']).adx()
+        df['cci'] = ta.trend.CCIIndicator(high=df['high'], low=df['low'], close=df['close']).cci()
+        
+        # NaN değerleri temizle - güncellenmiş versiyon
+        df = df.ffill().bfill()  # Forward fill ve backward fill
+        
+        return df
+        
+    except Exception as e:
+        print(f"Teknik gösterge hesaplanırken hata oluştu: {str(e)}")
+        # Temel veriyi geri döndür
+        return df
+
+def main():
+    # İndirilecek coinler
+    symbols = [
+        'BTC/USDT', 'ETH/USDT', 'XRP/USDT', 
+        'ADA/USDT', 'SOL/USDT', 'DOGE/USDT', 
+        'BNB/USDT'
+    ]
+    
+    # Tarih aralıklarını böl
+    date_ranges = [
+        ('2023-01-01', '2023-06-30'),
+        ('2023-07-01', '2023-12-31'),
+        ('2024-01-01', '2024-06-30'),
+        ('2024-07-01', '2024-12-31'),
+        ('2025-01-01', '2025-02-17')
+    ]
+    
+    # Her coin için her tarih aralığını indir
+    for symbol in symbols:
+        all_data = []
+        
+        for start_date, end_date in date_ranges:
+            print(f"\n{symbol} için {start_date} - {end_date} arası veriler indiriliyor...")
+            try:
+                df = download_crypto_data(
+                    symbol=symbol,
+                    start_date=start_date,
+                    end_date=end_date,
+                    timeframe='5m'
+                )
+                all_data.append(df)
+            except Exception as e:
+                print(f"Hata: {symbol} için {start_date} - {end_date} arası veriler indirilemedi: {str(e)}")
+                continue
+        
+        if all_data:
+            # Tüm verileri birleştir
+            combined_df = pd.concat(all_data, ignore_index=True)
+            combined_df = combined_df.drop_duplicates(subset=['timestamp'])
+            combined_df = combined_df.sort_values('timestamp')
+            
+            # Kaydet
+            symbol_filename = symbol.replace('/', '')
+            filename = f'binance_{symbol_filename}_5m_data.csv'
+            combined_df.to_csv(filename, index=False)
+            print(f"\n{filename} kaydedildi. Toplam satır sayısı: {len(combined_df)}")
+
+if __name__ == "__main__":
+    main()
